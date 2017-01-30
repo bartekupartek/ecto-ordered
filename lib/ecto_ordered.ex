@@ -112,6 +112,14 @@ defmodule EctoOrdered do
     execute_increment(struct, query)
   end
 
+  defp increment_position(%Order{repo: r, module: module, field: field, scope: scope, new_position: split_by, new_scope: new_scope} = struct) when is_list(scope) do
+    query =
+      module
+      |> where([m], field(m, ^field) >= ^split_by)
+      |> multi_scope_query(scope, new_scope)
+    execute_increment(struct, query)
+  end
+
   defp increment_position(%Order{module: module, field: field, scope: scope, new_position: split_by, new_scope: new_scope} = struct) do
     query = from m in module,
             where: field(m, ^field) >= ^split_by and field(m, ^scope) == ^new_scope
@@ -124,10 +132,26 @@ defmodule EctoOrdered do
     execute_decrement(struct, query)
   end
 
+  defp decrement_position(%Order{module: module, field: field, old_position: split_by, until: nil, old_scope: old_scope, scope: scope} = struct) when is_list(scope) do
+    query =
+      module
+      |> where([m], field(m, ^field) > ^split_by)
+      |> multi_scope_query(scope, old_scope)
+    execute_decrement(struct, query)
+  end
+
   defp decrement_position(%Order{module: module, field: field, old_position: split_by, until: nil, old_scope: old_scope, scope: scope} = struct) do
     query = from m in module,
     where: field(m, ^field) > ^split_by
     and field(m, ^scope) == ^old_scope
+    execute_decrement(struct, query)
+  end
+
+  defp decrement_position(%Order{module: module, field: field, scope: scope, old_position: split_by, until: until, old_scope: old_scope} = struct) when is_list(scope) do
+    query =
+      module
+      |> where([m], field(m, ^field) > ^split_by and field(m, ^field) <= ^until)
+      |> multi_scope_query(scope, old_scope)
     execute_decrement(struct, query)
   end
 
@@ -148,8 +172,16 @@ defmodule EctoOrdered do
   end
   defp validate_position!(cs, _), do: cs
 
+  defp update_old_scope(%Order{scope: scope} = struct, cs) when is_list(scope) do
+    %{struct|old_scope: Enum.map(scope, fn(f) -> Map.get(cs.data, f) end)}
+  end
+
   defp update_old_scope(%Order{scope: scope} = struct, cs) do
     %{struct|old_scope: Map.get(cs.data, scope)}
+  end
+
+  defp update_new_scope(%Order{scope: scope} = struct, cs) when is_list(scope) do
+    %{struct|new_scope: Enum.map(scope, fn(f) -> get_field(cs, f) end)}
   end
 
   defp update_new_scope(%Order{scope: scope} = struct, cs) do
@@ -170,6 +202,14 @@ defmodule EctoOrdered do
     %{struct|max: max}
   end
 
+  defp reorder_model(%Order{scope: scope, new_scope: new_scope, old_scope: old_scope} = struct, cs)
+    when not is_nil(old_scope) and is_list(scope) and new_scope != old_scope do
+    cs
+    |> change(Enum.zip(scope, new_scope))
+    |> before_delete(struct)
+
+    before_insert(cs, struct)
+  end
 
   defp reorder_model(%Order{scope: scope, old_scope: old_scope, new_scope: new_scope} = struct, cs)
       when not is_nil(old_scope) and new_scope != old_scope do
@@ -222,9 +262,17 @@ defmodule EctoOrdered do
     from(m in module) |> selector(field)
   end
 
+  defp query(%Order{module: module, field: field, scope: scope}, cs) when is_list(scope) do
+    Enum.reduce(scope, module, fn(s, q) ->
+      new_scope = get_field(cs, s)
+      scope_query(q, s, new_scope)
+    end) |> selector(field)
+  end
+
   defp query(%Order{module: module, field: field, scope: scope}, cs) do
-     new_scope = get_field(cs, scope)
-     scope_query(module, field, scope, new_scope)
+    new_scope = get_field(cs, scope)
+    scope_query(module, scope, new_scope)
+    |> selector(field)
   end
 
   defp selector(q, field) do
@@ -240,15 +288,16 @@ defmodule EctoOrdered do
     query |> repo.update_all([inc: [{field, -1}]])
   end
 
-  defp scope_query(q, field, scope, nil) do
-    q
-    |> selector(field)
-    |> where([m], is_nil(field(m, ^scope)))
+  defp multi_scope_query(query, scope, new_scope) do
+    Enum.zip(scope, new_scope)
+    |> Enum.reduce(query, fn(s, q) -> scope_query(q, elem(s, 0), elem(s, 1)) end)
   end
 
-  defp scope_query(q, field, scope, new_scope) do
-    q
-    |> selector(field)
-    |> where([m], field(m, ^scope) == ^new_scope)
+  defp scope_query(q, scope, nil) do
+    q |> where([m], is_nil(field(m, ^scope)))
+  end
+
+  defp scope_query(q, scope, new_scope) do
+    q |> where([m], field(m, ^scope) == ^new_scope)
   end
 end
